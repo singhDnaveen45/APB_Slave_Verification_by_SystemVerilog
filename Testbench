@@ -1,0 +1,479 @@
+//****************** APB Slave Testbench Environment by SV ************************************************
+//********** INTERFACE ***************************//
+interface apb_if();
+
+  bit        pclk;
+  bit        presetn;
+  logic [31:0] paddr;
+  logic        psel;
+  logic        penable;
+  logic        pwrite;
+  logic [31:0] pwdata;
+  logic [31:0] prdata;
+  logic        pready;
+  logic        pslverr;
+
+  // Clocking block for driver (output signals to DUT)
+  clocking drv_cb @(posedge pclk);
+    default input #1step output #1step;
+    output paddr, psel, penable, pwrite, pwdata;
+    input  prdata, pready, pslverr;
+  endclocking
+
+  // Clocking block for monitor (input signals from DUT)
+  clocking mon_cb @(posedge pclk);
+    default input #1step output #1step;
+    input paddr, psel, penable, pwrite, pwdata, prdata, pready, pslverr;
+  endclocking
+
+  // Modport for driver
+  modport DRIVER (
+    clocking drv_cb,
+    input    pclk,
+    output   presetn
+  );
+
+  // Modport for monitor
+  modport MONITOR (
+    clocking mon_cb,
+    input    pclk, presetn
+  );
+
+       //--------------------ASSERTION---------------------------
+      sequence SETUP;
+        $rose(psel) && $stable(penable);
+      endsequence
+      
+      sequence ACCESS;
+        $rose(penable) && $stable(psel);
+      endsequence
+      
+      sequence IDLE;
+        $fell(psel) && $fell(penable);
+      endsequence
+
+      property set_to_access;
+        @(posedge pclk) disable iff(!presetn)
+        SETUP |=> ACCESS;
+      endproperty
+      
+      property access_to_idle;
+        @(posedge pclk) disable iff(!presetn)
+        ACCESS |=> ##[0:5]IDLE;
+      endproperty
+      
+       property rcv_ready;
+        @(posedge pclk) disable iff(!presetn)
+         penable |=> ##[0:5]pready;
+      endproperty
+      
+      assert property(set_to_access)
+        $display("setup to access Passed");
+      else
+        $error("Assertion failed");
+        
+      assert property(access_to_idle)
+        $display("access to idle Passed");
+      else
+        $error("Assertion failed");
+      
+        assert property(rcv_ready)
+        $display("Ready Passed");
+      else
+        $error("Assertion failed");
+        
+   //-------x to z checker-----------------------------------
+        X_Z_checker_for_psel :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(psel)));
+        X_Z_checker_for_penable :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(penable)));
+          X_Z_checker_for_pready :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(pready)));
+            X_Z_checker_for_pwrite :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(pwrite)));
+              X_Z_checker_for_paddr :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(paddr)));
+                X_Z_checker_for_pwdata :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(pwdata)));
+                  X_Z_checker_for_prdata :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(prdata)));
+        X_Z_checker_for_pslverr :assert property(@(posedge pclk) disable iff(!presetn) (!$isunknown(pslverr)));
+                  
+endinterface
+           
+ //---------------------------------------------------------
+//********** TRANSACTION ***************************
+class transaction;
+ 
+  randc logic [4:0] paddr;
+  randc logic [4:0] pwdata;
+  rand logic pwrite;
+  logic psel;
+  logic penable;
+  logic [4:0] prdata;
+  logic pready;
+  logic pslverr;
+  
+  constraint write_c {pwrite dist{1:= 50 , 0:= 50};}
+    
+  constraint addr_c {paddr >= 1; paddr <= 20;}
+  
+  constraint data_c {pwdata>= 1; pwdata <= 20;}
+  
+  constraint addr_c_err {paddr == 32'hffff_ffff;}
+  
+  function void display(input string tag);
+    $display("[%0s] :  paddr:%0d  pwdata:%0d pwrite:%0b  prdata:%0d pslverr:%0b @ %0t",tag,paddr,pwdata, pwrite, prdata, pslverr,$time);
+  endfunction
+  
+endclass
+ //-------------------------------------------------
+ //********** COVERAGE CLASS ***************************           
+
+class coverage;
+  transaction tr;
+  covergroup apb_cov;
+    option.per_instance = 1;
+
+    ADDR: coverpoint tr.paddr {
+      bins addr_bins[] = {[0:31]};
+    }
+
+    DATA: coverpoint tr.pwdata {
+      bins data_bins[] = {[0:31]};
+    }
+
+    PWRITE: coverpoint tr.pwrite {
+      bins write = {1};
+      bins read = {0};
+    }
+
+    ADDRxDATA: cross ADDR, DATA;
+  endgroup
+
+  function new();
+    tr = new();
+    apb_cov = new();
+  endfunction
+
+  function void sample(transaction t);
+    tr = t;
+    apb_cov.sample();
+  endfunction
+endclass
+
+     
+ //********** GENERATOR CLASS ***************************
+class generator;
+  
+   transaction tr;// write_tr, read_tr;
+   mailbox #(transaction) mbx;
+   int count = 0;
+  
+   event nextdrv; ///driver completed task of triggering interface
+   event nextsco; ///scoreboard completed its objective
+   event done; 
+   
+   
+  function new(mailbox #(transaction) mbx);
+      this.mbx = mbx;
+      tr=new();
+   endfunction; 
+ 
+   task run(); 
+    
+     repeat(count)   
+       begin 
+         tr.addr_c.constraint_mode(1);
+         tr.addr_c_err.constraint_mode(0);
+           assert(tr.randomize()) else $error("Randomization failed");  
+           mbx.put(tr);
+           tr.display("GEN");
+           @(nextdrv);
+           @(nextsco);
+         end 
+    /* 
+      repeat(count)   
+       begin 
+         tr.addr_c.constraint_mode(0);
+         tr.addr_c_err.constraint_mode(1);
+           assert(tr.randomize()) else $error("Randomization failed");  
+           mbx.put(tr);
+           tr.display("GEN");
+           @(nextdrv);
+           @(nextsco);
+         end
+         */
+     ->done;
+   endtask
+  
+  
+endclass
+ 
+//****************** DRIVER ***************************
+ 
+class driver;
+  
+   virtual apb_if vif;
+   mailbox #(transaction) mbx;
+   transaction datac;
+  
+   event nextdrv;
+ 
+   function new(mailbox #(transaction) mbx);
+      this.mbx = mbx;
+   endfunction; 
+  
+  
+  task reset();
+    vif.presetn <= 1'b0;
+    vif.psel    <= 1'b0;
+    vif.penable <= 1'b0;
+    vif.pwdata  <= 0;
+    vif.paddr   <= 0;
+    vif.pwrite  <= 1'b0;
+    repeat(5) @(posedge vif.pclk);
+    vif.presetn <= 1'b1;
+    $display("[DRV] : RESET DONE");
+    $display("----------------------------------------------------------------------------");
+  endtask
+   
+  task run();
+    forever begin
+      
+      mbx.get(datac);
+      @(posedge vif.pclk);     
+      if(datac.pwrite == 1) ///write
+        begin
+        vif.psel    <= 1'b1;
+        vif.penable <= 1'b0;
+          vif.pwdata  <= datac.pwdata;
+          vif.paddr   <= datac.paddr;
+          vif.pwrite  <= 1'b1;
+            @(posedge vif.pclk);
+            vif.penable <= 1'b1; 
+          wait(vif.pready);
+          @(posedge vif.pclk);
+          {vif.psel,vif.penable} <= 2'b00;
+            datac.display("DRV");
+          @(posedge vif.pclk);
+            ->nextdrv;          
+        end
+      else if (datac.pwrite == 0) //read
+        begin
+            vif.psel <= 1'b1;
+           vif.penable <= 1'b0;
+          vif.pwdata <= 0;
+          vif.paddr <= datac.paddr;
+          vif.pwrite <= 1'b0;
+            @(posedge vif.pclk);
+            vif.penable <= 1'b1;
+            wait(vif.pready);
+            @(posedge vif.pclk);
+          {vif.psel,vif.penable} <= 2'b00;
+            datac.display("DRV");
+          @(posedge vif.pclk);
+            ->nextdrv;
+        end
+      
+    end
+  endtask
+  
+  
+endclass
+
+ 
+
+//********** MONITOR ***************************
+
+class monitor;
+  virtual apb_if.MONITOR vif;
+  mailbox #(transaction) mbx;
+  transaction tr;
+  coverage cov;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+    cov = new();  // instantiate coverage
+  endfunction;
+
+  task run();
+    tr = new();
+    forever begin
+      @(vif.mon_cb);
+      if(vif.mon_cb.pready) begin
+        tr.pwdata  = vif.mon_cb.pwdata;
+        tr.paddr   = vif.mon_cb.paddr;
+        tr.pwrite  = vif.mon_cb.pwrite;
+        tr.prdata  = vif.mon_cb.prdata;
+        tr.pslverr = vif.mon_cb.pslverr;
+        @(vif.mon_cb);
+        tr.display("MON");
+        mbx.put(tr);
+        cov.sample(tr);
+      end
+    end
+  endtask
+endclass
+
+//********** SCOREBOARD CLASS ***************************
+ 
+class scoreboard;
+  
+   mailbox #(transaction) mbx;
+   transaction tr;
+   event nextsco;
+  
+  bit [31:0] pwdata[31] = '{default:0};
+  bit [31:0] rdata;
+  int err = 0;
+  int cnt_slr = 0;
+  
+   function new(mailbox #(transaction) mbx);
+      this.mbx = mbx;     
+    endfunction;
+  
+  task run();
+  forever 
+      begin
+      
+      mbx.get(tr);
+      tr.display("SCO");
+      
+      if( (tr.pwrite == 1'b1) && (tr.pslverr == 1'b0))  ///write access
+        begin 
+        pwdata[tr.paddr] = tr.pwdata;
+        $display("[SCO] : DATA STORED DATA : %0d ADDR: %0d",tr.pwdata, tr.paddr);
+        end
+      else if((tr.pwrite == 1'b0) && (tr.pslverr == 1'b0))  ///read access
+        begin
+         rdata = pwdata[tr.paddr];    
+        if( tr.prdata == rdata)
+          $display("[SCO] : Data Matched");           
+        else
+          begin
+          err++;
+          $display("[SCO] : Data Mismatched");
+          end 
+        end 
+      else if(tr.pslverr == 1'b1)
+        begin
+          $display("[SCO] : SLV ERROR DETECTED, count_slverr = %0d",cnt_slr);
+          cnt_slr = cnt_slr+1;
+        end  
+      $display("---------------------------------------------------------------------------------------------------");
+      ->nextsco;
+ 
+  end
+    
+  endtask
+ 
+  
+endclass
+ 
+//********** ENVIRONMENT ***************************
+ 
+class environment;
+ 
+    generator gen;
+    driver drv;
+    monitor mon;
+    scoreboard sco; 
+    //coverage cov;  
+  
+    event nextgd; ///gen -> drv
+    event nextgs;  /// gen -> sco
+  
+  mailbox #(transaction) gdmbx; ///gen - drv
+     
+  mailbox #(transaction) msmbx;  /// mon - sco
+  
+    virtual apb_if vif;
+ 
+  
+  function new(virtual apb_if vif);
+       
+    gdmbx = new();
+    gen = new(gdmbx);
+    drv = new(gdmbx);
+    
+    
+    msmbx = new();
+    mon = new(msmbx);
+    sco = new(msmbx);
+    
+    this.vif = vif;
+    drv.vif = this.vif;
+    mon.vif = this.vif;
+    
+    gen.nextsco = nextgs;
+    sco.nextsco = nextgs;
+    
+    gen.nextdrv = nextgd;
+    drv.nextdrv = nextgd;
+ 
+  endfunction
+  
+  task pre_test();
+    drv.reset();
+  endtask
+  
+  task test();
+  fork
+    gen.run();
+    drv.run();
+    mon.run();
+    sco.run();
+  join_any
+  endtask
+  
+  task post_test();
+    wait(gen.done.triggered);  
+    $display("----Total number of Mismatch : %0d------",sco.err);
+    $display("Functional Coverage Summary:");
+    $display("==================================================");
+    $display("Functional Coverage = %0.2f%%", $get_coverage());
+    $display("==================================================");
+    //$display("Coverage percentage: %0.2f%%", coverage::apb_cov.get_inst_coverage());
+    $finish();
+  endtask
+  
+  task run();
+    pre_test();
+    test();
+    post_test();  
+  endtask
+  
+  
+  
+endclass
+ 
+ 
+//********** TOP ***************************
+ module tb;
+    
+   apb_if vif();
+ 
+   
+   apb_s dut (vif);
+     
+    initial begin
+      vif.pclk <= 0;
+    end
+    
+    always #10 vif.pclk <= ~vif.pclk;
+    
+    environment env;
+    
+    
+    
+    initial begin
+      env = new(vif);
+      env.gen.count = 30;
+      env.run();
+    end
+      
+    
+    initial begin
+      $dumpfile("dump.vcd");
+      $dumpvars;
+    end
+   
+    
+  endmodule
+
+
+//********************** END TB *************************************************
