@@ -1,0 +1,129 @@
+//********************** APB SLAVE DESIGN CODE ***********************************
+module apb_s(apb_if dif);
+
+  localparam [1:0] idle = 0, write = 1, read = 2;
+  reg [7:0] mem[16];
+  
+  reg [1:0] state, nstate;
+  
+  bit  addr_err , addv_err, data_err;
+  ////////// setup - correct apb cycles
+  /////////  addr_range - should be less than 16
+  /////////   addr_val - be greater than or equal to 0
+  /////////   data_val - be greater than or equal to 0  
+/*
+Transactions that receive an error, might or might not have changed the state of the peripheral. 
+This is peripheral-specific and either is acceptable. 
+When a write transaction receives an error this does not mean that the register within the peripheral 
+has not been updated. Read transactions that receive an error can return invalid data.
+ There is no requirement for the peripheral to drive the data bus to all 0s for a read error.
+*/
+  ///// reset decoder
+  always@(posedge dif.pclk, negedge dif.presetn)
+    begin
+      if(dif.presetn == 1'b0)
+          state <= idle;
+      else
+          state <= nstate;
+    end
+    
+    ///next state , output decoder
+  always@(*)
+    begin
+    case(state)
+     idle:
+     begin
+        dif.prdata    = 8'h00;
+        dif.pready    = 1'b0;
+        
+       if(dif.psel == 1'b1 && dif.pwrite == 1'b1)  
+                nstate = write;
+       else if (dif.psel == 1'b1 && dif.pwrite == 1'b0)
+                nstate = read;
+            else
+                nstate = idle; 
+            
+           
+                
+            
+      end   
+           
+     
+     write:
+     begin
+        if(dif.psel == 1'b1 && dif.penable == 1'b1)
+        begin 
+                 if(!addr_err && !addv_err && !data_err )
+                    begin
+                    dif.pready = 1'b1;
+                    mem[dif.paddr]  = dif.pwdata;
+                    nstate      = idle;
+                    end
+                else
+                     begin
+                     nstate = idle;
+                     dif.pready = 1'b1;
+                     end     
+                 
+     
+        end
+    end
+     
+    read:
+     begin
+        if(dif.psel == 1'b1 && dif.penable == 1'b1 )
+        begin
+            if(!addr_err && !addv_err && !data_err )
+                 begin
+                 dif.pready = 1'b1;
+                 dif.prdata = mem[dif.paddr];
+                 nstate      = idle;
+                 end
+            else
+                begin
+                dif.pready = 1'b1;
+                dif.prdata = 8'h00;
+                nstate      = idle;
+                end
+        end
+    end
+     
+    default : 
+    begin
+        nstate = idle; 
+        dif.prdata    = 8'h00;
+        dif.pready    = 1'b0;
+     end
+    endcase
+    end
+ 
+///////////////// checking valid values of address
+reg av_t = 0;
+always@(*)
+begin
+if(dif.paddr >= 0)
+  av_t = 1'b0;
+else
+  av_t = 1'b1;
+end
+ 
+///////////////// checking valid values of address
+reg dv_t = 0;
+always@(*)
+begin
+if(dif.pwdata >= 0)
+  dv_t = 1'b0;
+else
+  dv_t = 1'b1;
+end
+ 
+ 
+assign addr_err = ((nstate == write || read) && (dif.paddr > 15)) ? 1'b1 : 1'b0;
+assign addv_err = (nstate == write || read) ? av_t : 1'b0;
+assign data_err = (nstate == write || read) ? dv_t : 1'b0;
+ 
+assign dif.pslverr  = (dif.psel == 1'b1 && dif.penable == 1'b1) ? ( addv_err || addr_err || data_err) : 1'b0;
+ 
+endmodule
+
+//********************** END DUT ****************************************
